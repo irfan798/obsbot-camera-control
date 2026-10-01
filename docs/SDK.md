@@ -113,6 +113,25 @@ The binary contains code from several open source projects. No attribution is pr
 | nanopb (protobuf) | zlib license | Yes |
 | Boost | BSL-1.0 | Yes |
 
+## Product IDs and Protocol Versions
+
+`DevicePrivate::getProductTypeById()` maps USB vendor `0x3564` (or `0x6e30`) product ids `0xFEF0`-`0xFF01` through a table to `ObsbotProductType`:
+
+| PID | Model | PID | Model |
+|-----|-------|-----|-------|
+| `FEF0` | Tiny | `FEF9` | Tiny 2 Lite |
+| `FEF1` | Me | `FEFA` | HDMI Box |
+| `FEF2` | Meet | `FEFB` | Meet 2 |
+| `FEF3` | Meet 4K | `FEFC` | Tail 2 |
+| `FEF4` | Tiny 4K | `FEFD` | Tail 2S |
+| `FEF6` | Tail Air | `FEFE` | Meet SE |
+| `FEF8` | Tiny 2 | `FEFF` | Tiny SE |
+| | | `FF01` | NDI Box |
+
+Any other id becomes `ObsbotProdButt` (unknown), and for those the SDK sends the legacy V0 frame format on XU selector 2 (`aa 00 0c 12 ...`); known models get the V3 format (`aa 01 00 00 0c 00 ...`). Cameras released after the SDK speak V3 only, so they never answer the first command (get UUID) and initialisation fails with `error occurred in getDevUuidR, ret_val = -3`.
+
+The SDK reads the id from `/sys/class/video4linux/videoN/device/modalias` with `fopen()`. `src/common/SdkDeviceAlias.cpp` interposes `fopen()` and serves that file with a supported model's id for cameras in its alias table (currently Meet Flip `FF06` -> Meet 2 `FEFB`). The Meet Flip itself reports product type 25 in its device-info response, which this SDK logs as `error response` and otherwise ignores.
+
 ## Supported Devices (from SDK headers)
 
 The `ObsbotProductType` enum in `dev.hpp`:

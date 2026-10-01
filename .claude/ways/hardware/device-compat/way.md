@@ -13,6 +13,7 @@ keywords: device|camera model|tiny 2|tiny 4k|meet 2|meet se|tiny 2 lite|tiny se|
 | OBSBOT Tiny SE | Unknown | SDK supports it, `isTiny2Family()` includes it |
 | OBSBOT Tiny 4K | Unknown | Reported in #13, needs testing |
 | OBSBOT Meet SE | Partial | Basic compatibility confirmed in #9 |
+| OBSBOT Meet Flip | Good | PID 0xFF06, aliased to Meet 2 for the SDK (`SdkDeviceAlias`); zoom via V4L2 |
 
 ## SDK-Listed Devices (not all tested)
 

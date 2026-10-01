@@ -49,6 +49,8 @@ add_executable(obsbot-gui
     src/gui/XYPad.h
     src/common/Config.cpp
     src/common/Config.h
+    src/common/SdkDeviceAlias.cpp
+    src/common/SdkDeviceAlias.h
     resources/resources.qrc
 )
 
@@ -67,6 +69,7 @@ target_link_libraries(obsbot-gui PRIVATE
     Qt6::MultimediaWidgets
     Qt6::OpenGLWidgets
     dev
+    ${CMAKE_DL_LIBS}
 )
 
 target_compile_definitions(obsbot-gui PRIVATE
@@ -78,6 +81,8 @@ add_executable(obsbot-cli
     src/cli/meet2_test.cpp
     src/common/Config.cpp
     src/common/Config.h
+    src/common/SdkDeviceAlias.cpp
+    src/common/SdkDeviceAlias.h
 )
 
 target_include_directories(obsbot-cli PRIVATE
@@ -91,6 +96,7 @@ target_link_directories(obsbot-cli PRIVATE
 
 target_link_libraries(obsbot-cli PRIVATE
     dev
+    ${CMAKE_DL_LIBS}
 )
 
 # Set RPATH for finding libdev.so

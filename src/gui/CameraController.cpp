@@ -1,9 +1,13 @@
 #include "CameraController.h"
+#include "SdkDeviceAlias.h"
 #include <QThread>
 #include <QDebug>
 #include <algorithm>
 
 static constexpr int kDefaultWhiteBalanceKelvin = 4800;
+// The SDK enumerates on its own thread and takes ~3.3 s to list a camera after
+// first use, so an empty device list right after startup doesn't mean "unsupported".
+static constexpr int kSdkDetectGraceMs = 5000;
 
 CameraController::CameraController(QObject *parent)
     : QObject(parent)
@@ -65,6 +69,7 @@ void CameraController::connectToCamera(const QString &devicePath)
                 m_cameraInfo.version = QString::fromStdString(m_device->devVersion());
                 m_cameraInfo.productType = m_device->productType();
                 m_cameraInfo.connected = true;
+                detectAliasedModel();
                 refreshControlRanges();
                 emit cameraConnected(m_cameraInfo);
                 updateState();
@@ -72,6 +77,8 @@ void CameraController::connectToCamera(const QString &devicePath)
         } else {
             m_connected = false;
             m_cameraInfo.connected = false;
+            m_isMeetFlip = false;
+            m_v4l2.close();
             resetControlRanges();
             emit cameraDisconnected();
         }
@@ -91,12 +98,29 @@ void CameraController::connectToCamera(const QString &devicePath)
             m_cameraInfo.version = QString::fromStdString(m_device->devVersion());
             m_cameraInfo.productType = m_device->productType();
             m_cameraInfo.connected = true;
+            detectAliasedModel();
             refreshControlRanges();
             emit cameraConnected(m_cameraInfo);
             updateState();
         }
     } else {
-        tryV4l2Fallback();
+        QTimer::singleShot(kSdkDetectGraceMs, this, [this]() {
+            if (!m_connected)
+                tryV4l2Fallback();
+        });
+    }
+}
+
+void CameraController::detectAliasedModel()
+{
+    // The Meet Flip runs the Meet 2 command set, except that SDK zoom does nothing
+    // and its status block misreports HDR, FOV and zoom. Zoom therefore goes through
+    // V4L2 and the other two keep the last value we set (see updateState()).
+    const std::string path = m_device->videoDevPath();
+    m_isMeetFlip = SdkDeviceAlias::realProductId(path) == SdkDeviceAlias::kMeetFlipProductId;
+    if (m_isMeetFlip) {
+        m_cameraInfo.name = QStringLiteral("OBSBOT Meet Flip");
+        m_v4l2.open(path);
     }
 }
 
@@ -187,10 +211,7 @@ void CameraController::updateV4l2State()
         : static_cast<int>(Device::DevWhiteBalanceManual);
     m_currentState.whiteBalanceKelvin = m_v4l2.getWhiteBalanceTemperature();
 
-    auto zoomRange = m_v4l2.getZoomRange();
-    int zoomMax = zoomRange.valid ? zoomRange.max : 100;
-    int zoomRaw = m_v4l2.getZoomAbsolute();
-    m_currentState.zoom = (zoomMax > 0) ? (static_cast<double>(zoomRaw) / zoomMax + 1.0) : 1.0;
+    m_currentState.zoom = readV4l2Zoom();
 
     auto panRange = m_v4l2.getPanRange();
     auto tiltRange = m_v4l2.getTiltRange();
@@ -205,6 +226,15 @@ void CameraController::updateV4l2State()
     emit stateChanged(m_currentState);
 }
 
+// V4L2 zoom_absolute (0..max) mapped onto the controller's 1.0x..2.0x scale.
+double CameraController::readV4l2Zoom()
+{
+    auto zoomRange = m_v4l2.getZoomRange();
+    int zoomMax = zoomRange.valid ? zoomRange.max : 100;
+    int zoomRaw = m_v4l2.getZoomAbsolute();
+    return (zoomMax > 0) ? (static_cast<double>(zoomRaw) / zoomMax + 1.0) : 1.0;
+}
+
 void CameraController::disconnectFromCamera()
 {
     if (m_connected) {
@@ -213,6 +243,8 @@ void CameraController::disconnectFromCamera()
             m_v4l2Only = false;
         } else {
             m_device.reset();
+            m_v4l2.close();
+            m_isMeetFlip = false;
         }
         m_connected = false;
         m_cameraInfo.connected = false;
@@ -416,7 +448,7 @@ bool CameraController::setZoom(double zoom)
     zoom = qBound(1.0, zoom, 2.0);
 
     bool success;
-    if (m_v4l2Only) {
+    if (m_v4l2Only || m_isMeetFlip) {
         auto zoomRange = m_v4l2.getZoomRange();
         int zoomMax = zoomRange.valid ? zoomRange.max : 100;
         int v4l2Zoom = static_cast<int>((zoom - 1.0) * zoomMax);
@@ -445,9 +477,12 @@ bool CameraController::setHDR(bool enabled)
 {
     if (!m_connected || m_v4l2Only) return false;
 
-    return executeCommand(enabled ? "Enable HDR" : "Disable HDR", [this, enabled]() {
+    bool success = executeCommand(enabled ? "Enable HDR" : "Disable HDR", [this, enabled]() {
         return m_device->cameraSetWdrR(enabled ? Device::DevWdrModeDol2TO1 : Device::DevWdrModeNone);
     });
+    if (success)
+        m_currentState.hdrEnabled = enabled;
+    return success;
 }
 
 bool CameraController::setFOV(int fovMode)
@@ -462,9 +497,12 @@ bool CameraController::setFOV(int fovMode)
         default: return false;
     }
 
-    return executeCommand("Set FOV", [this, fov]() {
+    bool success = executeCommand("Set FOV", [this, fov]() {
         return m_device->cameraSetFovU(fov);
     });
+    if (success)
+        m_currentState.fovMode = fovMode;
+    return success;
 }
 
 bool CameraController::setFaceAE(bool enabled)
@@ -704,20 +742,26 @@ void CameraController::updateState()
 
     m_currentState.aiMode = status.tiny.ai_mode;
     m_currentState.aiSubMode = status.tiny.ai_sub_mode;
-    m_currentState.zoomRatio = status.tiny.zoom_ratio;
-    // Derive zoom float from zoom_ratio (100 = 1.0x, 200 = 2.0x)
-    if (status.tiny.zoom_ratio >= 100 && status.tiny.zoom_ratio <= 200) {
-        m_currentState.zoom = status.tiny.zoom_ratio / 100.0;
+    if (m_isMeetFlip) {
+        // These status fields don't line up on the Flip; see detectAliasedModel().
+        m_currentState.zoom = readV4l2Zoom();
+        m_currentState.zoomRatio = qRound(m_currentState.zoom * 100);
     } else {
-        qDebug() << "CameraController: unexpected zoom_ratio" << status.tiny.zoom_ratio
-                 << "— keeping previous zoom" << m_currentState.zoom;
+        m_currentState.zoomRatio = status.tiny.zoom_ratio;
+        // Derive zoom float from zoom_ratio (100 = 1.0x, 200 = 2.0x)
+        if (status.tiny.zoom_ratio >= 100 && status.tiny.zoom_ratio <= 200) {
+            m_currentState.zoom = status.tiny.zoom_ratio / 100.0;
+        } else {
+            qDebug() << "CameraController: unexpected zoom_ratio" << status.tiny.zoom_ratio
+                     << "— keeping previous zoom" << m_currentState.zoom;
+        }
+        m_currentState.hdrEnabled = status.tiny.hdr;
+        m_currentState.fovMode = status.tiny.fov;
     }
-    m_currentState.hdrEnabled = status.tiny.hdr;
     m_currentState.faceAEEnabled = status.tiny.face_ae;
     m_currentState.faceFocusEnabled = status.tiny.face_auto_focus;
     m_currentState.autoFocusEnabled = status.tiny.auto_focus;
     m_currentState.manualFocusValue = status.tiny.manual_focus_value;
-    m_currentState.fovMode = status.tiny.fov;
     m_currentState.devStatus = status.tiny.dev_status;
     m_currentState.autoFramingEnabled = (m_currentState.aiMode != Device::AiWorkModeNone);
     m_currentState.trackSpeedMode = status.tiny.ai_tracker_speed;

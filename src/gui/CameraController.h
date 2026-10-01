@@ -153,6 +153,7 @@ private:
     bool m_connected;
     QString m_selectedDevicePath;
     bool m_v4l2Only = false;
+    bool m_isMeetFlip = false;  // SDK sees it as a Meet 2 (SdkDeviceAlias); zoom goes through m_v4l2
     V4l2Backend m_v4l2;
     QTimer *m_v4l2ScanTimer = nullptr;
     QString m_v4l2DevicePath;
@@ -170,10 +171,12 @@ private:
     bool m_whiteBalanceFallbackActive;
     int m_fallbackWhiteBalanceMode;
     bool isTiny2Family() const;
+    void detectAliasedModel();
     void tryV4l2Fallback();
     void connectV4l2(const std::string &devicePath);
     void refreshV4l2ControlRanges();
     void updateV4l2State();
+    double readV4l2Zoom();
 
     // Helper
     bool executeCommand(const QString &description, std::function<int32_t()> command);
